@@ -1,4 +1,6 @@
-# SVAT - Synthetic Video Analyzing Tool
+![Status](https://img.shields.io/badge/status-alpha-orange)
+
+# SVAT - Synthetic Video Analyzing Tool 🚧
 **⚠️ Work in Progress** - Features may change
 
 SVAT is a Gradio app for analyzing videos. Its designed to check if a video is ai-generated or a real video. At the current state it focusses on manually optical check.
