@@ -3,6 +3,9 @@ from PIL import Image
 import numpy as np
 import cv2
 from io import BytesIO
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+
 try:
     import pywt
     PYWT_AVAILABLE = True
@@ -22,14 +25,18 @@ def laplacian_highpass(img):
     # Apply Laplacian
     laplacian = cv2.Laplacian(gray, cv2.CV_64F, ksize=3)
     
-    # Normalize to 0-255
+    # Normalize to 0-255 (fixed for NumPy 2.x)
     laplacian_norm = np.absolute(laplacian)
-    laplacian_norm = np.uint8(255 * laplacian_norm / np.max(laplacian_norm)) if np.max(laplacian_norm) > 0 else np.uint8(laplacian_norm)
+    if np.max(laplacian_norm) > 0:
+        laplacian_norm = (laplacian_norm / np.max(laplacian_norm)) * 255.0
+        laplacian_norm = np.clip(laplacian_norm, 0, 255).astype(np.uint8)
+    else:
+        laplacian_norm = np.zeros_like(laplacian_norm, dtype=np.uint8)
     
     return Image.fromarray(laplacian_norm)
 
 def fft_spectrum(img):
-    """Computes 2D FFT and visualizes log-scaled magnitude spectrum."""
+    """Computes 2D FFT and visualizes log-scaled magnitude spectrum with viridis colormap."""
     arr = np.array(img)
     
     # Convert to grayscale
@@ -46,10 +53,20 @@ def fft_spectrum(img):
     magnitude_spectrum = np.abs(f_shift)
     magnitude_spectrum = np.log1p(magnitude_spectrum)
     
-    # Normalize to 0-255
-    magnitude_spectrum = np.uint8(255 * magnitude_spectrum / np.max(magnitude_spectrum))
+    # Normalize to 0-1 (fixed for NumPy 2.x)
+    if np.max(magnitude_spectrum) > 0:
+        magnitude_spectrum = magnitude_spectrum / np.max(magnitude_spectrum)
+    else:
+        magnitude_spectrum = np.zeros_like(magnitude_spectrum)
     
-    return Image.fromarray(magnitude_spectrum)
+    # Apply viridis colormap (blue-green-yellow)
+    viridis = cm.get_cmap('viridis')
+    colored = viridis(magnitude_spectrum)  # Returns RGBA in range 0-1
+    
+    # Convert to RGB (remove alpha channel) and scale to 0-255
+    rgb = (colored[:, :, :3] * 255).astype(np.uint8)
+    
+    return Image.fromarray(rgb)
 
 def error_level_analysis(img, quality=90):
     """Performs Error Level Analysis via JPEG re-compression."""
@@ -57,7 +74,7 @@ def error_level_analysis(img, quality=90):
     
     # Save with specified quality
     buffer = BytesIO()
-    Image.fromarray(arr).save(buffer, format='JPEG', quality=quality)
+    Image.fromarray(arr).save(buffer, format='JPEG', quality=int(quality))
     buffer.seek(0)
     
     # Reload compressed image
@@ -99,12 +116,13 @@ def wavelet_decomposition(img):
     coeffs = pywt.dwt2(gray, 'haar')
     LL, (LH, HL, HH) = coeffs
     
-    # Normalize each subband
+    # Normalize each subband (fixed for NumPy 2.x)
     def normalize(band):
         band = np.abs(band)
         if np.max(band) > 0:
-            return np.uint8(255 * band / np.max(band))
-        return np.uint8(band)
+            band = (band / np.max(band)) * 255.0
+            return np.clip(band, 0, 255).astype(np.uint8)
+        return np.zeros_like(band, dtype=np.uint8)
     
     LL_norm = normalize(LL)
     LH_norm = normalize(LH)
@@ -183,39 +201,39 @@ def gradient_magnitude(img):
     # Compute magnitude
     magnitude = np.sqrt(grad_x**2 + grad_y**2)
     
-    # Normalize
-    magnitude = np.uint8(255 * magnitude / np.max(magnitude)) if np.max(magnitude) > 0 else np.uint8(magnitude)
+    # Normalize to 0-255 (fixed for NumPy 2.x)
+    if np.max(magnitude) > 0:
+        magnitude = (magnitude / np.max(magnitude)) * 255.0
+        magnitude = np.clip(magnitude, 0, 255).astype(np.uint8)
+    else:
+        magnitude = np.zeros_like(magnitude, dtype=np.uint8)
     
     return Image.fromarray(magnitude)
 
 def histogram_stretching(img):
-    """Applies extreme contrast stretching."""
+    """Applies CLAHE for adaptive contrast enhancement"""
     arr = np.array(img)
     
-    # Process each channel separately
     if len(arr.shape) == 3:
-        result = np.zeros_like(arr)
-        for i in range(arr.shape[2]):
-            channel = arr[:, :, i]
-            # Stretch to full range
-            min_val = np.min(channel)
-            max_val = np.max(channel)
-            if max_val > min_val:
-                stretched = 255 * (channel - min_val) / (max_val - min_val)
-                result[:, :, i] = np.uint8(stretched)
-            else:
-                result[:, :, i] = channel
+        # Convert to LAB color space
+        lab = cv2.cvtColor(arr, cv2.COLOR_RGB2LAB)
+        l, a, b = cv2.split(lab)
+        
+        # Apply CLAHE to L channel
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        l_clahe = clahe.apply(l)
+        
+        # Merge and convert back
+        lab_clahe = cv2.merge([l_clahe, a, b])
+        result = cv2.cvtColor(lab_clahe, cv2.COLOR_LAB2RGB)
         return Image.fromarray(result)
     else:
-        # Grayscale
-        min_val = np.min(arr)
-        max_val = np.max(arr)
-        if max_val > min_val:
-            stretched = 255 * (arr - min_val) / (max_val - min_val)
-            return Image.fromarray(np.uint8(stretched))
-        return Image.fromarray(arr)
+        # For grayscale
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        result = clahe.apply(arr)
+        return Image.fromarray(result)
 
-def process_image(slider_input, transformation):
+def process_image(slider_input, transformation, quality=90):
     """Applies the selected transformation."""
     # Extract image from slider input
     if slider_input is None:
@@ -234,15 +252,19 @@ def process_image(slider_input, transformation):
     transform_functions = {
         "Laplacian High-Pass": laplacian_highpass,
         "FFT Spectrum": fft_spectrum,
-        "Error Level Analysis": error_level_analysis,
+        "Error Level Analysis": lambda img: error_level_analysis(img, quality),
         "Wavelet Decomposition": wavelet_decomposition,
         "Noise Extraction": noise_extraction,
         "YCbCr Channels": ycbcr_channels,
         "Gradient Magnitude": gradient_magnitude,
-        "Histogram Stretching": histogram_stretching
+        "Histogram Stretching": histogram_stretching,
+        "None": lambda img: img  # Add None transformation
     }
     
-    transform_func = transform_functions.get(transformation, laplacian_highpass)
+    transform_func = transform_functions.get(transformation)
+    if transform_func is None:
+        return (img, img)
+    
     transformed = transform_func(img)
     
     # Return as tuple for ImageSlider
