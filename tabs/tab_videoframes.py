@@ -40,7 +40,7 @@ def merge_annotations(base_image, annotations, mode, current_frame_idx, global_a
     
     return img
 
-def apply_transformation(frame, transformation, process_image_func):
+def apply_transformation(frame, transformation, quality, process_image_func):
     """Applies selected transformation to frame"""
     if frame is None or transformation == "None":
         return frame
@@ -51,8 +51,8 @@ def apply_transformation(frame, transformation, process_image_func):
     else:
         pil_frame = frame
     
-    # Call process_image with the frame
-    result = process_image_func(pil_frame, transformation)
+    # Call process_image with the frame and quality
+    result = process_image_func(pil_frame, transformation, quality)
     
     # Extract transformed image from tuple
     if isinstance(result, tuple) and len(result) == 2:
@@ -60,19 +60,25 @@ def apply_transformation(frame, transformation, process_image_func):
     else:
         transformed = result
     
-    # Convert back to numpy array
+    # CRITICAL FOR GRADIO 6.x: Convert grayscale to RGB
     if transformed is not None:
+        if isinstance(transformed, Image.Image) and transformed.mode == 'L':
+            transformed = transformed.convert('RGB')
+        elif isinstance(transformed, np.ndarray) and len(transformed.shape) == 2:
+            transformed = Image.fromarray(cv2.cvtColor(transformed, cv2.COLOR_GRAY2RGB))
+        
+        # Convert to numpy array
         return np.array(transformed)
     
     return frame
 
-def create_sketchpad_value(base_image, annotations, mode, current_frame_idx, global_annotation, transformation, process_image_func):
+def create_sketchpad_value(base_image, annotations, mode, current_frame_idx, global_annotation, transformation, quality, process_image_func):
     """Creates Sketchpad value (Background + Layers)"""
     if base_image is None:
         return None
     
     # Apply transformation first
-    transformed_frame = apply_transformation(base_image, transformation, process_image_func)
+    transformed_frame = apply_transformation(base_image, transformation, quality, process_image_func)
     
     # Prepare base image
     if isinstance(transformed_frame, np.ndarray):
@@ -120,7 +126,7 @@ def extract_annotation_from_sketch(sketch_data):
     
     return None
 
-def create_comparison_slider(frame, transformation, process_image_func):
+def create_comparison_slider(frame, transformation, quality, process_image_func):
     """Creates ImageSlider comparison between original and transformed frame"""
     if frame is None:
         return None
@@ -135,7 +141,7 @@ def create_comparison_slider(frame, transformation, process_image_func):
         return (original, original)
     
     # Apply transformation
-    transformed_array = apply_transformation(frame, transformation, process_image_func)
+    transformed_array = apply_transformation(frame, transformation, quality, process_image_func)
     
     if isinstance(transformed_array, np.ndarray):
         transformed = Image.fromarray(transformed_array)
@@ -145,10 +151,15 @@ def create_comparison_slider(frame, transformation, process_image_func):
     return (original, transformed)
 
 
-def update_frame_display(frame_idx, frames, fps, annotations, global_annotation, annotation_mode, transformation, process_image_func):
+def update_frame_display(frame_idx, frames, fps, annotations, global_annotation, annotation_mode, transformation, quality, process_image_func):
     """Updates frame display"""
     if not frames or frame_idx >= len(frames):
-        return {"background": None, "layers": []}, None, f"Frame {int(frame_idx)+1} / 0", "--:--"
+        return (
+            {"background": None, "layers": [], "composite": None},  # Fixed: Added 'composite' key
+            None, 
+            f"Frame {int(frame_idx)+1} / 0", 
+            "--:--"
+        )
     
     # Calculate video time
     if fps > 0:
@@ -163,31 +174,31 @@ def update_frame_display(frame_idx, frames, fps, annotations, global_annotation,
     frame = frames[int(frame_idx)]
     
     # Create Sketchpad value with transformation
-    sketch_value = create_sketchpad_value(frame, annotations, annotation_mode, int(frame_idx), global_annotation, transformation, process_image_func)
+    sketch_value = create_sketchpad_value(frame, annotations, annotation_mode, int(frame_idx), global_annotation, transformation, quality, process_image_func)
     
     # Create comparison slider
-    slider_value = create_comparison_slider(frame, transformation, process_image_func)
+    slider_value = create_comparison_slider(frame, transformation, quality, process_image_func)
     
     return sketch_value, slider_value, f"Frame {int(frame_idx)+1} / {len(frames)}", time_str
 
 
-def go_to_prev_frame(current_idx, steps, frames, fps, annotations, global_annotation, annotation_mode, transformation, process_image_func):
+def go_to_prev_frame(current_idx, steps, frames, fps, annotations, global_annotation, annotation_mode, transformation, quality, process_image_func):
     """Goes one frame back"""
     if not frames:
         return 0, {"background": None, "layers": []}, None, "No video loaded", "--:--"
     
     new_idx = max(0, int(current_idx) - steps)
-    sketch_value, slider_value, info, time_str = update_frame_display(new_idx, frames, fps, annotations, global_annotation, annotation_mode, transformation, process_image_func)
+    sketch_value, slider_value, info, time_str = update_frame_display(new_idx, frames, fps, annotations, global_annotation, annotation_mode, transformation, quality, process_image_func)
     return new_idx, sketch_value, slider_value, info, time_str
 
 
-def go_to_next_frame(current_idx, steps, frames, fps, annotations, global_annotation, annotation_mode, transformation, process_image_func):
+def go_to_next_frame(current_idx, steps, frames, fps, annotations, global_annotation, annotation_mode, transformation, quality, process_image_func):
     """Goes one frame forward"""
     if not frames:
         return 0, {"background": None, "layers": []}, None, "No video loaded", "--:--"
     
     new_idx = min(len(frames) - 1, int(current_idx) + steps)
-    sketch_value, slider_value, info, time_str = update_frame_display(new_idx, frames, fps, annotations, global_annotation, annotation_mode, transformation, process_image_func)
+    sketch_value, slider_value, info, time_str = update_frame_display(new_idx, frames, fps, annotations, global_annotation, annotation_mode, transformation, quality, process_image_func)
     return new_idx, sketch_value, slider_value, info, time_str
 
 
@@ -251,10 +262,45 @@ def clear_annotations(mode, annotations, global_annotation):
         return annotations, None
 
 
-def create_tab_videoframes(tab_label, process_image):
+def toggle_accordion(accordion_name, current_active):
+    """Toggles accordion visibility and returns new transformation state with button variants"""
+    transformation_names = [
+        "Laplacian High-Pass",
+        "FFT Spectrum",
+        "Error Level Analysis",
+        "Wavelet Decomposition",
+        "Noise Extraction",
+        "YCbCr Channels",
+        "Gradient Magnitude",
+        "Histogram Stretching"
+    ]
+    
+    if current_active == accordion_name:
+        # Clicking active accordion closes it -> None
+        new_transformation = "None"
+        visibility = [False] * 8
+        variants = ["secondary"] * 8  # All buttons secondary (gray)
+    else:
+        # Open clicked accordion, close all others
+        new_transformation = accordion_name
+        visibility = [accordion_name == name for name in transformation_names]
+        # Set clicked button to primary (highlighted), others to secondary
+        variants = ["primary" if accordion_name == name else "secondary" for name in transformation_names]
+    
+    return (new_transformation, 
+            *[gr.update(visible=v) for v in visibility],
+            *[gr.update(variant=var) for var in variants])
+
+
+def create_tab_videoframes(tab_label, process_image, shared_video_frames=None):
     """Creates a tab for video frame processing"""
     with gr.TabItem(tab_label):
-        video_frames = gr.State([])
+        # Use shared state if provided, otherwise create local state
+        if shared_video_frames is None:
+            video_frames = gr.State([])
+        else:
+            video_frames = shared_video_frames
+            
         current_frame_idx = gr.State(0)
         video_duration = gr.State(0)
         video_fps = gr.State(0)
@@ -262,6 +308,7 @@ def create_tab_videoframes(tab_label, process_image):
         global_annotation = gr.State(None)
         annotation_mode = gr.State("A")
         selected_transformation = gr.State("None")
+        ela_quality = gr.State(90)
         
         
         # Row 1: raw video
@@ -306,36 +353,65 @@ def create_tab_videoframes(tab_label, process_image):
                                 scale=2
                             )
             with gr.Column(scale=1, min_width=1):
-                
-
-                frame_info = gr.Textbox(label="Frame Info", value="No video loaded", interactive=False, scale=2,)
+                frame_info = gr.Textbox(label="Frame Info", value="No video loaded", interactive=False, scale=2)
                 video_time_display = gr.Textbox(label="Video Time", value="--:--", interactive=False, scale=1)   
                 gr.Markdown("---")
-                radio_transformation = gr.Radio(
-                    choices=[
-                        "None",
-                        "Laplacian High-Pass",
-                        "FFT Spectrum",
-                        "Error Level Analysis",
-                        "Wavelet Decomposition",
-                        "Noise Extraction",
-                        "YCbCr Channels",
-                        "Gradient Magnitude",
-                        "Histogram Stretching"
-                    ],
-                    value="None",
-                    label="Frame Transformation",
-                    info="Apply analysis filters to the current frame"
-                )
+                
+                # Accordion-based transformation selection
+                with gr.Column():
+                    gr.Markdown("### Frame Transformation")
+                    gr.Markdown("*Click to activate transformation*")
+                    
+                    # Laplacian High-Pass
+                    btn_laplacian = gr.Button("▶ Laplacian High-Pass", size="sm")
+                    with gr.Column(visible=False) as content_laplacian:
+                        gr.Markdown("Emphasizes high-frequency details and edges")
+                    
+                    # FFT Spectrum
+                    btn_fft = gr.Button("▶ FFT Spectrum", size="sm")
+                    with gr.Column(visible=False) as content_fft:
+                        gr.Markdown("Shows frequency domain representation")
+                    
+                    # Error Level Analysis
+                    btn_ela = gr.Button("▶ Error Level Analysis", size="sm")
+                    with gr.Column(visible=False) as content_ela:
+                        gr.Markdown("Detects JPEG compression artifacts")
+                        quality_slider = gr.Slider(
+                            minimum=1,
+                            maximum=99,
+                            value=90,
+                            step=1,
+                            label="JPEG Quality",
+                            info="Higher = more subtle differences"
+                        )
+                    
+                    # Wavelet Decomposition
+                    btn_wavelet = gr.Button("▶ Wavelet Decomposition", size="sm")
+                    with gr.Column(visible=False) as content_wavelet:
+                        gr.Markdown("Multi-scale frequency analysis")
+                    
+                    # Noise Extraction
+                    btn_noise = gr.Button("▶ Noise Extraction", size="sm")
+                    with gr.Column(visible=False) as content_noise:
+                        gr.Markdown("Isolates high-frequency noise")
+                    
+                    # YCbCr Channels
+                    btn_ycbcr = gr.Button("▶ YCbCr Channels", size="sm")
+                    with gr.Column(visible=False) as content_ycbcr:
+                        gr.Markdown("Separates luminance and chrominance")
+                    
+                    # Gradient Magnitude
+                    btn_gradient = gr.Button("▶ Gradient Magnitude", size="sm")
+                    with gr.Column(visible=False) as content_gradient:
+                        gr.Markdown("Visualizes edge strength via Sobel")
+                    
+                    # Histogram Stretching
+                    btn_histogram = gr.Button("▶ Histogram Stretching", size="sm")
+                    with gr.Column(visible=False) as content_histogram:
+                        gr.Markdown("Extreme contrast enhancement")
  
-       # with gr.Row():
-       #     with gr.Column():
-       #         frame_info = gr.Textbox(label="Frame Info", value="No video loaded", interactive=False, scale=2)
-       #         video_time_display = gr.Textbox(label="Video Time", value="--:--", interactive=False, scale=1)    
-            
         # Row: Frame navigation    
         with gr.Row():
-            
             gr.Markdown("---")
 
         with gr.Row():            
@@ -355,47 +431,162 @@ def create_tab_videoframes(tab_label, process_image):
             
         with gr.Row():
             gr.Markdown("---")
+        
+        # Collect all content columns for visibility updates
+        content_columns = [
+            content_laplacian,
+            content_fft,
+            content_ela,
+            content_wavelet,
+            content_noise,
+            content_ycbcr,
+            content_gradient,
+            content_histogram
+        ]
+        
+        # Collect all buttons for variant updates
+        transformation_buttons = [
+            btn_laplacian,
+            btn_fft,
+            btn_ela,
+            btn_wavelet,
+            btn_noise,
+            btn_ycbcr,
+            btn_gradient,
+            btn_histogram
+        ]
+        
+        # Accordion button clicks
+        btn_laplacian.click(
+            fn=lambda current: toggle_accordion("Laplacian High-Pass", current),
+            inputs=[selected_transformation],
+            outputs=[selected_transformation] + content_columns + transformation_buttons
+        ).then(
+            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: update_frame_display(idx, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
+            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
+            outputs=[sketch_output, comparison_slider, frame_info, video_time_display]
+        )
+        
+        btn_fft.click(
+            fn=lambda current: toggle_accordion("FFT Spectrum", current),
+            inputs=[selected_transformation],
+            outputs=[selected_transformation] + content_columns + transformation_buttons
+        ).then(
+            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: update_frame_display(idx, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
+            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
+            outputs=[sketch_output, comparison_slider, frame_info, video_time_display]
+        )
+        
+        btn_ela.click(
+            fn=lambda current: toggle_accordion("Error Level Analysis", current),
+            inputs=[selected_transformation],
+            outputs=[selected_transformation] + content_columns + transformation_buttons
+        ).then(
+            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: update_frame_display(idx, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
+            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
+            outputs=[sketch_output, comparison_slider, frame_info, video_time_display]
+        )
+        
+        btn_wavelet.click(
+            fn=lambda current: toggle_accordion("Wavelet Decomposition", current),
+            inputs=[selected_transformation],
+            outputs=[selected_transformation] + content_columns + transformation_buttons
+        ).then(
+            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: update_frame_display(idx, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
+            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
+            outputs=[sketch_output, comparison_slider, frame_info, video_time_display]
+        )
+        
+        btn_noise.click(
+            fn=lambda current: toggle_accordion("Noise Extraction", current),
+            inputs=[selected_transformation],
+            outputs=[selected_transformation] + content_columns + transformation_buttons
+        ).then(
+            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: update_frame_display(idx, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
+            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
+            outputs=[sketch_output, comparison_slider, frame_info, video_time_display]
+        )
+        
+        btn_ycbcr.click(
+            fn=lambda current: toggle_accordion("YCbCr Channels", current),
+            inputs=[selected_transformation],
+            outputs=[selected_transformation] + content_columns + transformation_buttons
+        ).then(
+            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: update_frame_display(idx, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
+            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
+            outputs=[sketch_output, comparison_slider, frame_info, video_time_display]
+        )
+        
+        btn_gradient.click(
+            fn=lambda current: toggle_accordion("Gradient Magnitude", current),
+            inputs=[selected_transformation],
+            outputs=[selected_transformation] + content_columns + transformation_buttons
+        ).then(
+            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: update_frame_display(idx, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
+            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
+            outputs=[sketch_output, comparison_slider, frame_info, video_time_display]
+        )
+        
+        btn_histogram.click(
+            fn=lambda current: toggle_accordion("Histogram Stretching", current),
+            inputs=[selected_transformation],
+            outputs=[selected_transformation] + content_columns + transformation_buttons
+        ).then(
+            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: update_frame_display(idx, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
+            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
+            outputs=[sketch_output, comparison_slider, frame_info, video_time_display]
+        )
+        
+        # Quality slider change (only affects ELA)
+        quality_slider.change(
+            fn=lambda q: q,
+            inputs=[quality_slider],
+            outputs=[ela_quality]
+        ).then(
+            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: update_frame_display(idx, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
+            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
+            outputs=[sketch_output, comparison_slider, frame_info, video_time_display]
+        )
            
-            
         # Video Upload
         video_input.change(
             fn=load_video_frames,
             inputs=[video_input],
             outputs=[video_frames, current_frame_idx, frame_slider, frame_info, video_duration, video_fps, frame_annotations, global_annotation]
         ).then(
-            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans: update_frame_display(idx, frames, fps, annots, glob_annot, mode, trans, process_image),
-            inputs=[current_frame_idx, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation],
+            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: update_frame_display(idx, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
+            inputs=[current_frame_idx, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
             outputs=[sketch_output, comparison_slider, frame_info, video_time_display]
         )
         
         # Frame Navigation
         frame_slider.release(
-            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans: update_frame_display(idx, frames, fps, annots, glob_annot, mode, trans, process_image),
-            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation],
+            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: update_frame_display(idx, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
+            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
             outputs=[sketch_output, comparison_slider, frame_info, video_time_display]
         )
         
         btn_prev_frame.click(
-            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans: go_to_prev_frame(idx, 1, frames, fps, annots, glob_annot, mode, trans, process_image),
-            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation],
+            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: go_to_prev_frame(idx, 1, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
+            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
             outputs=[frame_slider, sketch_output, comparison_slider, frame_info, video_time_display]
         )
         
         btn_next_frame.click(
-            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans: go_to_next_frame(idx, 1, frames, fps, annots, glob_annot, mode, trans, process_image),
-            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation],
+            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: go_to_next_frame(idx, 1, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
+            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
             outputs=[frame_slider, sketch_output, comparison_slider, frame_info, video_time_display]
         )
         
         btn_prev10_frame.click(
-            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans: go_to_prev_frame(idx, 10, frames, fps, annots, glob_annot, mode, trans, process_image),
-            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation],
+            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: go_to_prev_frame(idx, 10, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
+            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
             outputs=[frame_slider, sketch_output, comparison_slider, frame_info, video_time_display]
         )
         
         btn_next10_frame.click(
-            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans: go_to_next_frame(idx, 10, frames, fps, annots, glob_annot, mode, trans, process_image),
-            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation],
+            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: go_to_next_frame(idx, 10, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
+            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
             outputs=[frame_slider, sketch_output, comparison_slider, frame_info, video_time_display]
         )
         
@@ -406,25 +597,14 @@ def create_tab_videoframes(tab_label, process_image):
             outputs=[frame_annotations, global_annotation]
         )
         
-        # Transformation Change
-        radio_transformation.change(
-            fn=lambda new_trans: new_trans,
-            inputs=[radio_transformation],
-            outputs=[selected_transformation]
-        ).then(
-            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans: update_frame_display(idx, frames, fps, annots, glob_annot, mode, trans, process_image),
-            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation],
-            outputs=[sketch_output, comparison_slider, frame_info, video_time_display]
-        )
-        
         # Mode Change
         radio_mode.change(
             fn=lambda new_mode: new_mode,
             inputs=[radio_mode],
             outputs=[annotation_mode]
         ).then(
-            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans: update_frame_display(idx, frames, fps, annots, glob_annot, mode, trans, process_image),
-            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation],
+            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: update_frame_display(idx, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
+            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
             outputs=[sketch_output, comparison_slider, frame_info, video_time_display]
         )
         
@@ -434,7 +614,10 @@ def create_tab_videoframes(tab_label, process_image):
             inputs=[annotation_mode, frame_annotations, global_annotation],
             outputs=[frame_annotations, global_annotation]
         ).then(
-            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans: update_frame_display(idx, frames, fps, annots, glob_annot, mode, trans, process_image),
-            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation],
+            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: update_frame_display(idx, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
+            inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
             outputs=[sketch_output, comparison_slider, frame_info, video_time_display]
         )
+
+        # Return video_frames state for sharing with other tabs
+        return video_frames
