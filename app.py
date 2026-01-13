@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """
 SVAT - Synthetic Video Analyze Tool
-
 Created on Wed Oct 29 12:00:23 2025
 @author: standarduser
 """
@@ -11,6 +10,7 @@ import gradio as gr
 from tabs.tab_videoframes import create_tab_videoframes
 from tabs.tab_fft import create_tab_image_fft
 from tabs.tab_video_analysis import create_tab_video_analysis
+from tabs.tab_classify_image import create_tab_classify_image
 from processing.image_processing import process_image
 
 # Gradio App erstellen
@@ -27,8 +27,10 @@ with gr.Blocks() as demo:
         
         # Tab 2: Video-level analysis
         video_analysis_frames = create_tab_video_analysis("Video Analysis")
-        
-        # Tab 3: Help
+       
+        create_tab_classify_image("Classify Image") 
+       
+        # Tab 4: Help
         create_tab_image_fft("Help")
     
     # Connect the video frames state between tabs
