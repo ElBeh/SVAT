@@ -94,7 +94,7 @@ def error_level_analysis(img, quality=90):
     return Image.fromarray(diff)
 
 def wavelet_decomposition(img):
-    """Decomposes image into wavelet subbands (LL, LH, HL, HH)."""
+    """Decomposes image into wavelet subbands with proper visualization"""
     if not PYWT_AVAILABLE:
         # Fallback: return grayscale
         arr = np.array(img)
@@ -116,18 +116,34 @@ def wavelet_decomposition(img):
     coeffs = pywt.dwt2(gray, 'haar')
     LL, (LH, HL, HH) = coeffs
     
-    # Normalize each subband (fixed for NumPy 2.x)
-    def normalize(band):
-        band = np.abs(band)
+    # Different normalization for LL vs high-frequency bands
+    def normalize_lowfreq(band):
+        """Standard normalization for LL (approximation)"""
         if np.max(band) > 0:
             band = (band / np.max(band)) * 255.0
             return np.clip(band, 0, 255).astype(np.uint8)
         return np.zeros_like(band, dtype=np.uint8)
     
-    LL_norm = normalize(LL)
-    LH_norm = normalize(LH)
-    HL_norm = normalize(HL)
-    HH_norm = normalize(HH)
+    def normalize_highfreq(band, amplification=30):
+        """Amplified normalization for high-frequency details"""
+        band = np.abs(band)
+        
+        # Amplify before normalization
+        band = band * amplification
+        
+        # Clip to prevent overflow
+        band = np.clip(band, 0, 255)
+        
+        # Normalize to full range
+        if np.max(band) > 0:
+            band = (band / np.max(band)) * 255.0
+            return band.astype(np.uint8)
+        return np.zeros_like(band, dtype=np.uint8)
+    
+    LL_norm = normalize_lowfreq(LL)
+    LH_norm = normalize_highfreq(LH)  # Horizontal edges
+    HL_norm = normalize_highfreq(HL)  # Vertical edges
+    HH_norm = normalize_highfreq(HH)  # Diagonal edges/noise
     
     # Combine into single image (2x2 grid)
     top = np.hstack([LL_norm, LH_norm])
