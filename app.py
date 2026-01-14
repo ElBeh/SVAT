@@ -8,7 +8,7 @@ Created on Wed Oct 29 12:00:23 2025
 
 import gradio as gr
 from tabs.tab_videoframes import create_tab_videoframes
-from tabs.tab_fft import create_tab_image_fft
+from tabs.tab_info import create_tab_info
 from tabs.tab_video_analysis import create_tab_video_analysis
 from tabs.tab_classify_image import create_tab_classify_image
 from processing.image_processing import process_image
@@ -31,7 +31,7 @@ with gr.Blocks() as demo:
         create_tab_classify_image("Classify Image") 
        
         # Tab 4: Help
-        create_tab_image_fft("Help")
+        create_tab_info("Info")
     
     # Connect the video frames state between tabs
     # When frames are loaded in tab 1, update tab 2
