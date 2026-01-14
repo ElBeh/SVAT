@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """
 Video Analysis Tab - Global analysis functions for entire videos
-
 @author: standarduser
 """
 import gradio as gr

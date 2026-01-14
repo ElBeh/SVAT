@@ -2,13 +2,17 @@
 # -*- coding: utf-8 -*-
 """
 Created on Sat Nov  8 09:54:54 2025
-
 @author: standarduser
 """
 import gradio as gr
 import cv2
 import numpy as np
 from PIL import Image
+import tempfile
+import os
+
+# Import classification function
+from tabs.tab_classify_image import predict_from_space
 
 # CSS for box styling
 css = """
@@ -151,6 +155,56 @@ def create_comparison_slider(frame, transformation, quality, process_image_func)
     return (original, transformed)
 
 
+# NEW: Classification functions
+def classify_current_frame(frame_idx, frames, existing_classifications):
+    """Classify current frame and cache result"""
+    frame_idx = int(frame_idx)
+    
+    # Check if already classified
+    if frame_idx in existing_classifications:
+        return (
+            existing_classifications[frame_idx],
+            f"✓ Cached result (Frame {frame_idx + 1})",
+            existing_classifications
+        )
+    
+    if not frames or frame_idx >= len(frames):
+        return None, "✗ No frame available", existing_classifications
+    
+    frame = frames[frame_idx]
+    
+    # Save temp file
+    with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+        Image.fromarray(frame).save(tmp.name, 'JPEG', quality=95)
+        tmp_path = tmp.name
+    
+    try:
+        result = predict_from_space(tmp_path)
+        
+        # Cache result
+        new_classifications = existing_classifications.copy()
+        new_classifications[frame_idx] = result
+        
+        return result, f"✓ Frame {frame_idx + 1} classified", new_classifications
+    
+    except Exception as e:
+        return None, f"✗ API Error: {str(e)}", existing_classifications
+    
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+def update_classification_display(frame_idx, classifications):
+    """Update classification display when switching frames"""
+    frame_idx = int(frame_idx)
+    
+    if frame_idx in classifications:
+        return classifications[frame_idx], f"✓ Frame {frame_idx + 1} (cached)"
+    else:
+        return None, "Not classified yet"
+
+
 def update_frame_display(frame_idx, frames, fps, annotations, global_annotation, annotation_mode, transformation, quality, process_image_func):
     """Updates frame display"""
     if not frames or frame_idx >= len(frames):
@@ -205,7 +259,7 @@ def go_to_next_frame(current_idx, steps, frames, fps, annotations, global_annota
 def load_video_frames(video_path):
     """Loads all frames from a video"""
     if video_path is None:
-        return [], 0, gr.update(maximum=0, value=0), "No video loaded", 0, 0, {}, None
+        return [], 0, gr.update(maximum=0, value=0), "No video loaded", 0, 0, {}, None, {}  # Added {} for frame_classifications
     
     cap = cv2.VideoCapture(video_path)
     frames = []
@@ -220,7 +274,7 @@ def load_video_frames(video_path):
     cap.release()
     
     if len(frames) == 0:
-        return [], 0, gr.update(maximum=0, value=0), "No frames found", 0, 0, {}, None
+        return [], 0, gr.update(maximum=0, value=0), "No frames found", 0, 0, {}, None, {}  # Added {} for frame_classifications
     
     duration = len(frames) / fps if fps > 0 else 0
     
@@ -232,7 +286,8 @@ def load_video_frames(video_path):
         duration,
         fps,
         {},
-        None
+        None,
+        {}  # Reset frame_classifications
     )
 
 
@@ -309,6 +364,7 @@ def create_tab_videoframes(tab_label, process_image, shared_video_frames=None):
         annotation_mode = gr.State("A")
         selected_transformation = gr.State("None")
         ela_quality = gr.State(90)
+        frame_classifications = gr.State({})  # NEW: Store classification results
         
         
         # Row 1: raw video
@@ -355,6 +411,7 @@ def create_tab_videoframes(tab_label, process_image, shared_video_frames=None):
             with gr.Column(scale=1, min_width=1):
                 frame_info = gr.Textbox(label="Frame Info", value="No video loaded", interactive=False, scale=2)
                 video_time_display = gr.Textbox(label="Video Time", value="--:--", interactive=False, scale=1)   
+                
                 gr.Markdown("---")
                 
                 # Accordion-based transformation selection
@@ -410,6 +467,21 @@ def create_tab_videoframes(tab_label, process_image, shared_video_frames=None):
                     with gr.Column(visible=False) as content_histogram:
                         gr.Markdown("Extreme contrast enhancement")
  
+        # Row: Frame Classification
+        with gr.Row():
+            gr.Markdown("---")
+        
+        with gr.Accordion("Frame Classification - (optimized model for ai images)", open=False):
+            with gr.Row():
+                with gr.Column(scale=1):
+                    with gr.Row():
+                        btn_classify_frame = gr.Button("🔍 Classify Current Frame", size="sm", variant="primary")
+                        btn_classify_all = gr.Button("🔬 Classify All Frames (Coming Soon)", size="sm", interactive=False)
+                with gr.Column(scale=2):
+                    classification_result = gr.Label(num_top_classes=2, label="Result")
+                with gr.Column(scale=1):
+                    classification_status = gr.Textbox(label="Status", value="Not classified yet", interactive=False)
+        
         # Row: Frame navigation    
         with gr.Row():
             gr.Markdown("---")
@@ -455,6 +527,13 @@ def create_tab_videoframes(tab_label, process_image, shared_video_frames=None):
             btn_gradient,
             btn_histogram
         ]
+        
+        # NEW: Classification button event
+        btn_classify_frame.click(
+            fn=classify_current_frame,
+            inputs=[frame_slider, video_frames, frame_classifications],
+            outputs=[classification_result, classification_status, frame_classifications]
+        )
         
         # Accordion button clicks
         btn_laplacian.click(
@@ -548,46 +627,70 @@ def create_tab_videoframes(tab_label, process_image, shared_video_frames=None):
             outputs=[sketch_output, comparison_slider, frame_info, video_time_display]
         )
            
-        # Video Upload
+        # Video Upload - MODIFIED: Added frame_classifications to outputs
         video_input.change(
             fn=load_video_frames,
             inputs=[video_input],
-            outputs=[video_frames, current_frame_idx, frame_slider, frame_info, video_duration, video_fps, frame_annotations, global_annotation]
+            outputs=[video_frames, current_frame_idx, frame_slider, frame_info, video_duration, video_fps, frame_annotations, global_annotation, frame_classifications]
         ).then(
             fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: update_frame_display(idx, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
             inputs=[current_frame_idx, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
             outputs=[sketch_output, comparison_slider, frame_info, video_time_display]
+        ).then(
+            fn=lambda: (None, "Not classified yet"),  # Reset classification display
+            inputs=[],
+            outputs=[classification_result, classification_status]
         )
         
-        # Frame Navigation
+        # Frame Navigation - MODIFIED: Added classification display update
         frame_slider.release(
             fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: update_frame_display(idx, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
             inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
             outputs=[sketch_output, comparison_slider, frame_info, video_time_display]
+        ).then(
+            fn=update_classification_display,
+            inputs=[frame_slider, frame_classifications],
+            outputs=[classification_result, classification_status]
         )
         
         btn_prev_frame.click(
             fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: go_to_prev_frame(idx, 1, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
             inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
             outputs=[frame_slider, sketch_output, comparison_slider, frame_info, video_time_display]
+        ).then(
+            fn=update_classification_display,
+            inputs=[frame_slider, frame_classifications],
+            outputs=[classification_result, classification_status]
         )
         
         btn_next_frame.click(
             fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: go_to_next_frame(idx, 1, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
             inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
             outputs=[frame_slider, sketch_output, comparison_slider, frame_info, video_time_display]
+        ).then(
+            fn=update_classification_display,
+            inputs=[frame_slider, frame_classifications],
+            outputs=[classification_result, classification_status]
         )
         
         btn_prev10_frame.click(
             fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: go_to_prev_frame(idx, 10, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
             inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
             outputs=[frame_slider, sketch_output, comparison_slider, frame_info, video_time_display]
+        ).then(
+            fn=update_classification_display,
+            inputs=[frame_slider, frame_classifications],
+            outputs=[classification_result, classification_status]
         )
         
         btn_next10_frame.click(
             fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: go_to_next_frame(idx, 10, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
             inputs=[frame_slider, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
             outputs=[frame_slider, sketch_output, comparison_slider, frame_info, video_time_display]
+        ).then(
+            fn=update_classification_display,
+            inputs=[frame_slider, frame_classifications],
+            outputs=[classification_result, classification_status]
         )
         
         # Sketchpad Change - Saves drawing
