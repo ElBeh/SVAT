@@ -10,6 +10,7 @@ import numpy as np
 from PIL import Image
 import tempfile
 import os
+import yt_dlp
 
 # Import classification function
 from tabs.tab_classify_image import predict_from_space
@@ -317,6 +318,132 @@ def clear_annotations(mode, annotations, global_annotation):
         return annotations, None
 
 
+MAX_YOUTUBE_DURATION = 30  # Maximum allowed video segment length in seconds
+
+
+def fetch_youtube_info(url):
+    """Fetch video metadata from a YouTube URL without downloading."""
+    if not url or not url.strip():
+        return (
+            "Please enter a URL.",
+            0,
+            gr.update(),                          # yt_start_time slider
+            gr.update(interactive=False, visible=False),  # download button
+            gr.update(visible=False),              # time range column
+        )
+
+    url = url.strip()
+
+    try:
+        ydl_opts = {"quiet": True, "no_warnings": True}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        duration = info.get("duration", 0)
+        title = info.get("title", "Unknown")
+        if len(title) > 60:
+            title = title[:57] + "..."
+
+        if duration <= MAX_YOUTUBE_DURATION:
+            status = f"**{title}** ({duration:.0f}s) — Ready to download."
+            return (
+                status,
+                duration,
+                gr.update(),
+                gr.update(interactive=True, visible=True),
+                gr.update(visible=False),
+            )
+        else:
+            mins = int(duration // 60)
+            secs = int(duration % 60)
+            max_start = max(0, int(duration - MAX_YOUTUBE_DURATION))
+            status = (
+                f"**{title}** ({mins}:{secs:02d}) — "
+                f"Exceeds {MAX_YOUTUBE_DURATION}s. Select a segment below."
+            )
+            return (
+                status,
+                duration,
+                gr.update(visible=True, maximum=max_start, value=0),
+                gr.update(interactive=True, visible=True),
+                gr.update(visible=True),
+            )
+
+    except Exception as e:
+        return (
+            f"Error: {e}",
+            0,
+            gr.update(),
+            gr.update(interactive=False, visible=False),
+            gr.update(visible=False),
+        )
+
+
+def update_segment_info(start_time):
+    """Return a text label showing the selected time segment."""
+    end = int(start_time) + MAX_YOUTUBE_DURATION
+    return f"Segment: **{int(start_time)}s – {end}s** ({MAX_YOUTUBE_DURATION}s)"
+
+
+def download_and_load_youtube(url, start_time, duration):
+    """Download a YouTube video (or segment) and load its frames."""
+    if not url or not url.strip():
+        return (
+            [], 0, gr.update(maximum=0, value=0),
+            "No video loaded", 0, 0, {}, None, {},
+            "No URL provided.",
+        )
+
+    url = url.strip()
+
+    try:
+        tmp_dir = tempfile.mkdtemp()
+        output_template = os.path.join(tmp_dir, "yt_video.%(ext)s")
+
+        ydl_opts = {
+            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "outtmpl": output_template,
+            "quiet": True,
+            "no_warnings": True,
+            "merge_output_format": "mp4",
+        }
+
+        # Only download a segment if the video exceeds the limit
+        if duration > MAX_YOUTUBE_DURATION:
+            end_time = float(start_time) + MAX_YOUTUBE_DURATION
+            ydl_opts["download_ranges"] = yt_dlp.utils.download_range_func(
+                None, [(float(start_time), end_time)]
+            )
+            ydl_opts["force_keyframes_at_cuts"] = True
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        # Locate the output file
+        video_path = None
+        for f in os.listdir(tmp_dir):
+            if f.endswith((".mp4", ".mkv", ".webm")):
+                video_path = os.path.join(tmp_dir, f)
+                break
+
+        if video_path is None:
+            return (
+                [], 0, gr.update(maximum=0, value=0),
+                "No video loaded", 0, 0, {}, None, {},
+                "Download failed — no output file found.",
+            )
+
+        result = load_video_frames(video_path)
+        return (*result, "Video loaded successfully.")
+
+    except Exception as e:
+        return (
+            [], 0, gr.update(maximum=0, value=0),
+            "No video loaded", 0, 0, {}, None, {},
+            f"Download error: {e}",
+        )
+
+
 def toggle_accordion(accordion_name, current_active):
     """Toggles accordion visibility and returns new transformation state with button variants"""
     transformation_names = [
@@ -365,13 +492,39 @@ def create_tab_videoframes(tab_label, process_image, shared_video_frames=None):
         selected_transformation = gr.State("None")
         ela_quality = gr.State(90)
         frame_classifications = gr.State({})  # NEW: Store classification results
+        yt_duration_state = gr.State(0)  # Store fetched YouTube video duration
         
         
         # Row 1: raw video
         with gr.Accordion("Video Input", open=True):
-            with gr.Row():
-                with gr.Column():
-                    video_input = gr.Video(label="Upload video", height=600, sources=['upload'], scale=1)
+            with gr.Tabs():
+                with gr.TabItem("Upload"):
+                    with gr.Row():
+                        with gr.Column():
+                            video_input = gr.Video(label="Upload video", height=600, sources=['upload'], scale=1)
+                
+                with gr.TabItem("YouTube"):
+                    with gr.Column():
+                        yt_url = gr.Textbox(
+                            label="YouTube URL",
+                            placeholder="https://www.youtube.com/watch?v=...",
+                        )
+                        yt_btn_fetch = gr.Button("Fetch Info", size="sm")
+                        yt_status = gr.Markdown("")
+
+                        with gr.Column(visible=False) as yt_time_col:
+                            yt_start_time = gr.Slider(
+                                minimum=0, maximum=0, step=1, value=0,
+                                label="Start time (seconds)",
+                            )
+                            yt_segment_info = gr.Markdown(
+                                f"Segment: **0s – {MAX_YOUTUBE_DURATION}s** ({MAX_YOUTUBE_DURATION}s)"
+                            )
+
+                        yt_btn_download = gr.Button(
+                            "Download & Load", size="sm",
+                            variant="primary", interactive=False, visible=False,
+                        )
                 
         
         with gr.Row():
@@ -638,6 +791,39 @@ def create_tab_videoframes(tab_label, process_image, shared_video_frames=None):
             outputs=[sketch_output, comparison_slider, frame_info, video_time_display]
         ).then(
             fn=lambda: (None, "Not classified yet"),  # Reset classification display
+            inputs=[],
+            outputs=[classification_result, classification_status]
+        )
+        
+        # YouTube: Fetch Info
+        yt_btn_fetch.click(
+            fn=fetch_youtube_info,
+            inputs=[yt_url],
+            outputs=[yt_status, yt_duration_state, yt_start_time, yt_btn_download, yt_time_col]
+        )
+
+        # YouTube: Update segment label when slider moves
+        yt_start_time.change(
+            fn=update_segment_info,
+            inputs=[yt_start_time],
+            outputs=[yt_segment_info]
+        )
+
+        # YouTube: Download & Load
+        yt_btn_download.click(
+            fn=download_and_load_youtube,
+            inputs=[yt_url, yt_start_time, yt_duration_state],
+            outputs=[
+                video_frames, current_frame_idx, frame_slider, frame_info,
+                video_duration, video_fps, frame_annotations, global_annotation,
+                frame_classifications, yt_status
+            ]
+        ).then(
+            fn=lambda idx, frames, fps, annots, glob_annot, mode, trans, quality: update_frame_display(idx, frames, fps, annots, glob_annot, mode, trans, quality, process_image),
+            inputs=[current_frame_idx, video_frames, video_fps, frame_annotations, global_annotation, annotation_mode, selected_transformation, ela_quality],
+            outputs=[sketch_output, comparison_slider, frame_info, video_time_display]
+        ).then(
+            fn=lambda: (None, "Not classified yet"),
             inputs=[],
             outputs=[classification_result, classification_status]
         )
