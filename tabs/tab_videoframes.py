@@ -503,7 +503,7 @@ def create_tab_videoframes(tab_label, process_image, shared_video_frames=None):
                         with gr.Column():
                             video_input = gr.Video(label="Upload video", height=600, sources=['upload'], scale=1)
                 
-                with gr.TabItem("YouTube"):
+                with gr.TabItem("YouTube (only local)"):
                     with gr.Column():
                         yt_url = gr.Textbox(
                             label="YouTube URL",
